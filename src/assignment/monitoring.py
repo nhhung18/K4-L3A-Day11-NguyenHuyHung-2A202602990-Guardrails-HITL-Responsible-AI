@@ -32,6 +32,7 @@ class MonitoringAlert:
     block_rate_threshold: float = 0.5
     rate_limit_hit_threshold: int = 5
     judge_fail_rate_threshold: float = 0.3
+    secret_leak_threshold: int = 1
     alerts: list[Alert] = field(default_factory=list)
 
     # Counters — update these from your pipeline after each request
@@ -40,18 +41,60 @@ class MonitoringAlert:
     rate_limit_hits: int = 0
     judge_checks: int = 0
     judge_fails: int = 0
+    secret_leak_attempts: int = 0
 
     def check_metrics(self) -> list[Alert]:
-        """TODO: compute rates, append Alert objects when thresholds exceeded."""
-        raise NotImplementedError("Implement MonitoringAlert.check_metrics")
+        """Recalculate alert conditions from current request counters.
+
+        Rates with a zero denominator are treated as zero. Existing alerts are
+        rebuilt on each call so repeated checks do not duplicate stale alerts.
+        """
+        snapshot = self.snapshot()
+        alerts: list[Alert] = []
+        if snapshot["block_rate"] > self.block_rate_threshold:
+            alerts.append(Alert(
+                metric="block_rate",
+                value=snapshot["block_rate"],
+                threshold=self.block_rate_threshold,
+                message="Request block rate exceeded the configured threshold.",
+            ))
+        if self.rate_limit_hits > self.rate_limit_hit_threshold:
+            alerts.append(Alert(
+                metric="rate_limit_hits",
+                value=float(self.rate_limit_hits),
+                threshold=float(self.rate_limit_hit_threshold),
+                message="Rate-limit hits exceeded the configured threshold.",
+            ))
+        if snapshot["judge_fail_rate"] > self.judge_fail_rate_threshold:
+            alerts.append(Alert(
+                metric="judge_fail_rate",
+                value=snapshot["judge_fail_rate"],
+                threshold=self.judge_fail_rate_threshold,
+                message="LLM judge failure rate exceeded the configured threshold.",
+            ))
+        if self.secret_leak_attempts >= self.secret_leak_threshold:
+            alerts.append(Alert(
+                metric="secret_leak_attempts",
+                value=float(self.secret_leak_attempts),
+                threshold=float(self.secret_leak_threshold),
+                message="Secret leak attempt(s) detected in output.",
+            ))
+        self.alerts = alerts
+        return list(self.alerts)
 
     def export_json(self, filepath: str | None = None):
         """TODO: write metrics + alerts to JSON under repo-root ``outputs/`` by default.
         Use ``filepath or default_metrics_path()`` so running from ``src/`` does not
         create ``src/outputs/``.
         """
-        _ = filepath or default_metrics_path()
-        raise NotImplementedError("Implement MonitoringAlert.export_json")
+        path = Path(filepath or default_metrics_path())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.check_metrics()
+        path.write_text(
+            json.dumps(self.snapshot(), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return str(path)
 
     def snapshot(self) -> dict:
         block_rate = (
@@ -70,6 +113,7 @@ class MonitoringAlert:
             "judge_checks": self.judge_checks,
             "judge_fails": self.judge_fails,
             "judge_fail_rate": judge_fail_rate,
+            "secret_leak_attempts": self.secret_leak_attempts,
             "alerts": [
                 {
                     "metric": a.metric,

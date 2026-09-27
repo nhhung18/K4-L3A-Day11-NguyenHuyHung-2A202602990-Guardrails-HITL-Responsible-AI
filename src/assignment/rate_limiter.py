@@ -7,6 +7,7 @@ guardrail layers do not address (flooding / cost attacks).
 from __future__ import annotations
 
 from collections import defaultdict, deque
+import math
 import time
 
 from google.adk.plugins import base_plugin
@@ -16,12 +17,18 @@ from google.genai import types
 class RateLimitPlugin(base_plugin.BasePlugin):
     """Block users who exceed max_requests within window_seconds."""
 
-    def __init__(self, max_requests: int = 10, window_seconds: int = 60):
+    def __init__(self, max_requests: int = 10, window_seconds: int = 60, warn_threshold: float = 0.8):
         super().__init__(name="rate_limiter")
+        if max_requests < 1:
+            raise ValueError("max_requests must be at least 1")
+        if window_seconds < 1:
+            raise ValueError("window_seconds must be at least 1")
         self.max_requests = max_requests
         self.window_seconds = window_seconds
+        self.warn_threshold = warn_threshold
         self.user_windows: dict[str, deque] = defaultdict(deque)
         self.blocked_count = 0
+        self.warned_count = 0
         self.total_count = 0
 
     def _block_response(self, message: str) -> types.Content:
@@ -37,13 +44,21 @@ class RateLimitPlugin(base_plugin.BasePlugin):
         now = time.time()
         window = self.user_windows[user_id]
 
-        # TODO: Implement sliding window:
-        # 1. Pop timestamps older than (now - window_seconds) from the left
-        # 2. If len(window) >= max_requests:
-        #       wait = window_seconds - (now - window[0])
-        #       self.blocked_count += 1
-        #       return self._block_response(
-        #           f"Rate limit exceeded. Try again in {wait:.0f}s."
-        #       )
-        # 3. Else: append now, return None
-        raise NotImplementedError("Implement RateLimitPlugin.on_user_message_callback")
+        cutoff = now - self.window_seconds
+        while window and window[0] <= cutoff:
+            window.popleft()
+
+        if len(window) >= self.max_requests:
+            wait = max(1, math.ceil(self.window_seconds - (now - window[0])))
+            self.blocked_count += 1
+            return self._block_response(
+                f"Rate limit exceeded. Try again in {wait}s."
+            )
+
+        window.append(now)
+
+        warn_limit = int(self.max_requests * self.warn_threshold)
+        if len(window) >= warn_limit:
+            self.warned_count += 1
+
+        return None
